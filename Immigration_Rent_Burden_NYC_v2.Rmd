@@ -1,0 +1,690 @@
+---
+title: "Immigration and Rent Burden in New York City"
+author: "Toni Akinyelu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    df_print: paged
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: readable
+    code_folding: show
+subtitle: Exploratory Analysis Using ACS DP02 & DP04 (2023)
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+```
+
+# Introduction
+
+## Research Context
+
+New York City is home to the largest immigrant population in the United States. According to the NYC Mayor's Office of Immigrant Affairs, approximately 3.1 million New Yorkers are foreign-born, representing roughly 36% of the city's total population (NYC Mayor's Office of Immigrant Affairs, 2024). This demographic reality has profound implications for housing markets, economic mobility, and urban policy.
+
+Immigrants in the United States are significantly more likely to rent rather than own their homes compared to native-born residents. This pattern is particularly pronounced in high-cost metropolitan areas like New York City, where housing affordability has reached crisis levels. Rent burden—defined as spending 30% or more of household income on housing costs—is a critical indicator of housing affordability and economic vulnerability.
+
+## Research Question
+
+This exploratory analysis investigates a fundamental question: **Do immigrant households in New York City spend a higher share of their income on rent than native-born households?**
+
+Understanding this relationship is essential for several reasons. First, housing costs directly impact economic mobility, savings capacity, and quality of life. Second, identifying disparities in rent burden can inform targeted policy interventions. Third, quantitative analysis of this relationship using publicly available data can provide an evidence base for advocacy and resource allocation.
+
+## Dataset Overview
+
+This analysis uses data from the **United States Census Bureau's American Community Survey (ACS) 1-Year Estimates**. The ACS is the premier source for detailed demographic, social, economic, and housing data in the United States. We specifically draw from two Data Profiles:
+
+- **DP02: Selected Social Characteristics** - Contains data on nativity and place of birth, including the percentage of foreign-born population
+- **DP04: Housing Characteristics** - Contains data on housing costs as a percentage of household income, including rent burden rates
+
+The unit of analysis is the five boroughs (counties) of New York City: Bronx, Brooklyn (Kings County), Manhattan (New York County), Queens, and Staten Island (Richmond County).
+
+## Ethical Considerations
+
+This analysis uses publicly available, aggregate data that does not identify individuals. The ACS employs rigorous privacy protections, including data suppression for small populations and noise injection techniques. However, ecological analyses at the borough level should be interpreted cautiously—findings describe aggregate patterns and should not be used to make inferences about individual immigrants or households.
+
+Additionally, the term "foreign-born" encompasses a heterogeneous population including naturalized citizens, lawful permanent residents, visa holders, and undocumented individuals. This analysis cannot distinguish between these groups, which limits the specificity of policy recommendations.
+
+---
+
+# Setup and Data Acquisition
+
+## Loading Required Packages
+
+We begin by loading the R packages necessary for data acquisition, manipulation, and visualization.
+
+```{r load-packages}
+# Install packages if not already installed
+packages <- c("tidycensus", "tidyverse", "ggplot2", "knitr", "kableExtra", 
+              "scales", "corrplot", "broom", "ggthemes")
+
+installed <- packages %in% rownames(installed.packages())
+if (any(!installed)) {
+  install.packages(packages[!installed])
+}
+
+# Load packages
+library(tidycensus)
+library(tidyverse)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(scales)
+library(corrplot)
+library(broom)
+library(ggthemes)
+```
+
+## Census API Configuration
+
+The `tidycensus` package provides a convenient interface to the Census Bureau's API. We set our API key to enable data retrieval.
+
+```{r api-key}
+# Set Census API key
+census_api_key("4a35457ac36b9aa063662af9fb9194781e527163", install = FALSE)
+```
+
+## Identifying Variables of Interest
+
+Before pulling data, we need to identify the specific variable codes for our measures. The ACS Data Profiles use standardized naming conventions.
+
+```{r variable-exploration}
+# View available DP02 variables (Social Characteristics)
+dp02_vars <- load_variables(2023, "acs1/profile", cache = TRUE) %>%
+  filter(str_detect(name, "DP02"))
+
+# View available DP04 variables (Housing Characteristics)
+dp04_vars <- load_variables(2023, "acs1/profile", cache = TRUE) %>%
+  filter(str_detect(name, "DP04"))
+
+# Display key variables we'll use
+key_vars <- tribble(
+  ~Variable, ~Description,
+  "DP02_0093PE", "Percent foreign born",
+  "DP04_0141PE", "Percent of renters spending 30%+ of income on rent",
+  "DP04_0142PE", "Percent of renters spending 35%+ of income on rent",
+  "DP02_0066E", "Median household income (estimate)"
+)
+
+kable(key_vars, caption = "Key Variables from ACS Data Profiles") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Data Retrieval
+
+We now pull the ACS 1-Year estimates for all five NYC boroughs. The borough-level data corresponds to county-level geography in Census terminology.
+
+```{r pull-data}
+# Define NYC borough FIPS codes (state = 36 for New York)
+# Bronx = 005, Kings (Brooklyn) = 047, New York (Manhattan) = 061
+# Queens = 081, Richmond (Staten Island) = 085
+
+nyc_counties <- c("005", "047", "061", "081", "085")
+
+# Pull DP02 data (Social Characteristics)
+dp02_data <- get_acs(
+  geography = "county",
+  variables = c(
+    foreign_born_pct = "DP02_0093PE",
+    foreign_born_est = "DP02_0093E"
+  ),
+  state = "NY",
+  county = nyc_counties,
+  year = 2023,
+  survey = "acs1",
+  output = "wide"
+)
+
+# Pull DP04 data (Housing Characteristics)
+dp04_data <- get_acs(
+  geography = "county",
+  variables = c(
+    rent_burden_30_pct = "DP04_0141PE",
+    rent_burden_35_pct = "DP04_0142PE",
+    median_rent = "DP04_0134E",
+    renter_occupied = "DP04_0047PE"
+  ),
+  state = "NY",
+  county = nyc_counties,
+  year = 2023,
+  survey = "acs1",
+  output = "wide"
+)
+
+# Pull median household income separately (from B19013)
+income_data <- get_acs(
+  geography = "county",
+  variables = c(median_income = "B19013_001"),
+  state = "NY",
+  county = nyc_counties,
+  year = 2023,
+  survey = "acs1",
+  output = "wide"
+)
+
+# Display raw data
+cat("DP02 Data (Social Characteristics):\n")
+print(dp02_data)
+
+cat("\nDP04 Data (Housing Characteristics):\n")
+print(dp04_data)
+```
+
+---
+
+# Data Preparation and Cleaning
+
+## Merging Datasets
+
+We combine the three data pulls into a single analytical dataset.
+
+```{r merge-data}
+# Merge all datasets by GEOID
+nyc_data <- dp02_data %>%
+  left_join(dp04_data, by = c("GEOID", "NAME")) %>%
+  left_join(income_data, by = c("GEOID", "NAME"))
+
+# View merged data structure
+glimpse(nyc_data)
+```
+
+## Variable Renaming and Selection
+
+We create clean, intuitive variable names and select only the columns needed for analysis.
+
+```{r clean-data}
+# Clean and rename variables
+nyc_clean <- nyc_data %>%
+  mutate(
+    # Extract borough names from NAME field
+    borough = case_when(
+      str_detect(NAME, "Bronx") ~ "Bronx",
+      str_detect(NAME, "Kings") ~ "Brooklyn",
+      str_detect(NAME, "New York County") ~ "Manhattan",
+      str_detect(NAME, "Queens") ~ "Queens",
+      str_detect(NAME, "Richmond") ~ "Staten Island",
+      TRUE ~ NAME
+    )
+  ) %>%
+  select(
+    geoid = GEOID,
+    borough,
+    foreign_born_pct,
+    foreign_born_pct_moe = DP02_0093PM,
+    rent_burden_pct = rent_burden_30_pct,
+    rent_burden_pct_moe = DP04_0141PM,
+    rent_burden_35_pct,
+    median_rent,
+    renter_pct = renter_occupied,
+    median_income = median_incomeE,
+    median_income_moe = median_incomeM
+  )
+
+# Display cleaned dataset
+kable(nyc_clean, 
+      caption = "NYC Borough Data: Immigration and Housing Characteristics",
+      digits = 1) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+## Data Quality Assessment
+
+Before proceeding with analysis, we check for missing values and assess data quality.
+
+```{r data-quality}
+# Check for missing values
+missing_summary <- nyc_clean %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_count")
+
+cat("Missing Value Summary:\n")
+print(missing_summary)
+
+# Summary statistics for key variables
+summary_stats <- nyc_clean %>%
+  select(foreign_born_pct, rent_burden_pct, median_income, median_rent) %>%
+  summary()
+
+print(summary_stats)
+```
+
+## Creating Derived Variables
+
+We create additional variables that may be useful for analysis.
+
+```{r derived-vars}
+nyc_analysis <- nyc_clean %>%
+  mutate(
+    # Categorize immigrant concentration
+    immigrant_level = case_when(
+      foreign_born_pct >= 40 ~ "High (40%+)",
+      foreign_born_pct >= 30 ~ "Moderate (30-40%)",
+      TRUE ~ "Lower (<30%)"
+    ),
+    # Categorize rent burden severity
+    rent_burden_level = case_when(
+      rent_burden_pct >= 55 ~ "Severe (55%+)",
+      rent_burden_pct >= 50 ~ "High (50-55%)",
+      TRUE ~ "Moderate (<50%)"
+    ),
+    # Income in thousands for easier interpretation
+    median_income_k = median_income / 1000
+  )
+
+# View final analytical dataset
+kable(nyc_analysis %>% select(borough, foreign_born_pct, rent_burden_pct, 
+                               median_income_k, immigrant_level, rent_burden_level),
+      caption = "Final Analytical Dataset",
+      col.names = c("Borough", "Foreign-Born %", "Rent Burden %", 
+                    "Median Income ($K)", "Immigrant Level", "Rent Burden Level"),
+      digits = 1) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+---
+
+# Exploratory Data Analysis
+
+## Descriptive Statistics
+
+We begin by examining the central tendency and spread of our key variables across NYC boroughs.
+
+```{r descriptive-stats}
+# Comprehensive descriptive statistics
+descriptive_table <- nyc_analysis %>%
+  summarise(
+    `Foreign-Born % (Mean)` = mean(foreign_born_pct, na.rm = TRUE),
+    `Foreign-Born % (SD)` = sd(foreign_born_pct, na.rm = TRUE),
+    `Foreign-Born % (Min)` = min(foreign_born_pct, na.rm = TRUE),
+    `Foreign-Born % (Max)` = max(foreign_born_pct, na.rm = TRUE),
+    `Rent Burden % (Mean)` = mean(rent_burden_pct, na.rm = TRUE),
+    `Rent Burden % (SD)` = sd(rent_burden_pct, na.rm = TRUE),
+    `Rent Burden % (Min)` = min(rent_burden_pct, na.rm = TRUE),
+    `Rent Burden % (Max)` = max(rent_burden_pct, na.rm = TRUE),
+    `Median Income (Mean)` = mean(median_income, na.rm = TRUE),
+    `Median Income (SD)` = sd(median_income, na.rm = TRUE)
+  ) %>%
+  pivot_longer(everything(), names_to = "Statistic", values_to = "Value")
+
+kable(descriptive_table, 
+      caption = "Descriptive Statistics for Key Variables",
+      digits = 2) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Distribution of Foreign-Born Population
+
+```{r bar-foreign-born}
+# Bar chart of foreign-born percentage by borough
+ggplot(nyc_analysis, aes(x = reorder(borough, -foreign_born_pct), 
+                          y = foreign_born_pct, 
+                          fill = immigrant_level)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = paste0(round(foreign_born_pct, 1), "%")), 
+            vjust = -0.5, size = 4) +
+  scale_fill_manual(values = c("High (40%+)" = "#1a5276", 
+                                "Moderate (30-40%)" = "#2980b9",
+                                "Lower (<30%)" = "#7fb3d5")) +
+  labs(
+    title = "Foreign-Born Population by NYC Borough",
+    subtitle = "Percentage of total population that is foreign-born (ACS 2023)",
+    x = "Borough",
+    y = "Foreign-Born Population (%)",
+    fill = "Immigrant Concentration"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(angle = 0, hjust = 0.5)
+  ) +
+  ylim(0, max(nyc_analysis$foreign_born_pct) * 1.15)
+```
+
+The bar chart reveals substantial variation in immigrant concentration across NYC boroughs. Queens has the highest percentage of foreign-born residents, followed by Brooklyn and the Bronx. Manhattan and Staten Island have comparatively lower immigrant shares, though still substantial by national standards.
+
+## Distribution of Rent Burden
+
+```{r bar-rent-burden}
+# Bar chart of rent burden by borough
+ggplot(nyc_analysis, aes(x = reorder(borough, -rent_burden_pct), 
+                          y = rent_burden_pct, 
+                          fill = rent_burden_level)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = paste0(round(rent_burden_pct, 1), "%")), 
+            vjust = -0.5, size = 4) +
+  geom_hline(yintercept = 50, linetype = "dashed", color = "red", linewidth = 0.8) +
+  annotate("text", x = 4.5, y = 51.5, label = "50% threshold", 
+           color = "red", size = 3) +
+  scale_fill_manual(values = c("Severe (55%+)" = "#922b21",
+                                "High (50-55%)" = "#e74c3c",
+                                "Moderate (<50%)" = "#f1948a")) +
+  labs(
+    title = "Rent Burden by NYC Borough",
+    subtitle = "Percentage of renter households spending 30%+ of income on rent",
+    x = "Borough",
+    y = "Rent-Burdened Households (%)",
+    fill = "Burden Severity"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text.x = element_text(angle = 0, hjust = 0.5)
+  ) +
+  ylim(0, max(nyc_analysis$rent_burden_pct) * 1.15)
+```
+
+The rent burden chart shows that all NYC boroughs have alarmingly high rates of rent burden, with the majority of renter households in most boroughs spending 30% or more of their income on rent. The Bronx shows the highest rent burden rate, consistent with its status as the borough with the lowest median household income.
+
+## Comparative Visualization: Side-by-Side Comparison
+
+```{r side-by-side}
+# Prepare data for side-by-side comparison
+comparison_data <- nyc_analysis %>%
+  select(borough, foreign_born_pct, rent_burden_pct) %>%
+  pivot_longer(cols = c(foreign_born_pct, rent_burden_pct),
+               names_to = "measure",
+               values_to = "value") %>%
+  mutate(measure = ifelse(measure == "foreign_born_pct", 
+                          "Foreign-Born %", "Rent Burden %"))
+
+# Grouped bar chart
+ggplot(comparison_data, aes(x = reorder(borough, -value), y = value, fill = measure)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_manual(values = c("Foreign-Born %" = "#2c3e50", 
+                                "Rent Burden %" = "#c0392b")) +
+  labs(
+    title = "Comparing Immigration and Rent Burden Across NYC Boroughs",
+    subtitle = "Side-by-side view of key variables",
+    x = "Borough",
+    y = "Percentage",
+    fill = "Measure"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "top"
+  )
+```
+
+## Income Distribution by Borough
+
+```{r income-bar}
+# Bar chart of median household income
+ggplot(nyc_analysis, aes(x = reorder(borough, median_income), 
+                          y = median_income/1000)) +
+  geom_col(fill = "#27ae60", width = 0.7) +
+  geom_text(aes(label = paste0("$", round(median_income/1000, 0), "K")), 
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  labs(
+    title = "Median Household Income by NYC Borough",
+    subtitle = "ACS 2023 1-Year Estimates",
+    x = "Borough",
+    y = "Median Household Income ($ Thousands)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 14)) +
+  ylim(0, max(nyc_analysis$median_income/1000) * 1.25)
+```
+
+---
+
+# Correlational Analysis
+
+## Bivariate Correlation Matrix
+
+We examine the correlations between our key variables to understand their relationships.
+
+```{r correlation-matrix}
+# Create correlation matrix
+cor_vars <- nyc_analysis %>%
+  select(foreign_born_pct, rent_burden_pct, median_income, median_rent, renter_pct) %>%
+  drop_na()
+
+cor_matrix <- cor(cor_vars, use = "complete.obs")
+
+# Display correlation matrix
+kable(round(cor_matrix, 3), 
+      caption = "Correlation Matrix of Key Variables") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Visualize correlation matrix
+corrplot(cor_matrix, method = "color", type = "upper",
+         addCoef.col = "black", number.cex = 0.8,
+         tl.col = "black", tl.srt = 45,
+         title = "Correlation Matrix: Immigration and Housing Variables",
+         mar = c(0, 0, 2, 0))
+```
+
+## Scatter Plot: Foreign-Born % vs. Rent Burden
+
+This is the key visualization for our research question.
+
+```{r scatter-main}
+# Main scatter plot with regression line
+ggplot(nyc_analysis, aes(x = foreign_born_pct, y = rent_burden_pct)) +
+  geom_point(aes(size = median_income/1000, color = borough), alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "#2c3e50", linetype = "dashed") +
+  geom_text(aes(label = borough), vjust = -1.2, hjust = 0.5, size = 3.5) +
+  scale_size_continuous(name = "Median Income ($K)", range = c(4, 12)) +
+  scale_color_brewer(palette = "Set1", guide = "none") +
+  labs(
+    title = "Relationship Between Immigration and Rent Burden in NYC",
+    subtitle = "Each point represents a NYC borough; bubble size indicates median income",
+    x = "Foreign-Born Population (%)",
+    y = "Rent-Burdened Households (%)",
+    caption = "Source: ACS 2023 1-Year Estimates | Dashed line shows linear trend"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11, color = "gray40"),
+    plot.caption = element_text(size = 9, color = "gray50")
+  )
+```
+
+The scatter plot reveals a positive association between foreign-born population share and rent burden rates across NYC boroughs. Boroughs with higher immigrant concentrations tend to have higher rates of rent burden. Notably, the relationship appears to persist even when considering median income (represented by bubble size).
+
+## Scatter Plot: Income vs. Rent Burden
+
+```{r scatter-income}
+# Scatter plot of income vs rent burden
+ggplot(nyc_analysis, aes(x = median_income/1000, y = rent_burden_pct)) +
+  geom_point(aes(color = borough), size = 5, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, color = "#8e44ad", linetype = "dashed") +
+  geom_text(aes(label = borough), vjust = -1, size = 3.5) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Relationship Between Income and Rent Burden",
+    subtitle = "Higher income boroughs show lower rent burden rates",
+    x = "Median Household Income ($ Thousands)",
+    y = "Rent-Burdened Households (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "none"
+  )
+```
+
+---
+
+# Statistical Modeling
+
+## Hypothesis
+
+Based on the exploratory analysis, we formulate our hypothesis:
+
+**H₀ (Null Hypothesis):** There is no relationship between immigrant population share and rent burden in NYC boroughs.
+
+**H₁ (Alternative Hypothesis):** Boroughs with higher immigrant household rates will have significantly higher rent burden rates.
+
+## Simple Linear Regression
+
+We first estimate a simple linear regression of rent burden on foreign-born population share.
+
+```{r simple-regression}
+# Simple linear regression
+model_simple <- lm(rent_burden_pct ~ foreign_born_pct, data = nyc_analysis)
+
+# Model summary
+summary(model_simple)
+
+# Tidy output
+simple_results <- tidy(model_simple, conf.int = TRUE)
+kable(simple_results, 
+      caption = "Simple Linear Regression: Rent Burden ~ Foreign-Born %",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Model fit statistics
+glance_simple <- glance(model_simple)
+kable(glance_simple %>% select(r.squared, adj.r.squared, p.value, sigma),
+      caption = "Model Fit Statistics",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Multiple Regression with Income Control
+
+To account for the potential confounding effect of income, we include median household income as a control variable.
+
+```{r multiple-regression}
+# Multiple regression with income control
+model_full <- lm(rent_burden_pct ~ foreign_born_pct + median_income, data = nyc_analysis)
+
+# Model summary
+summary(model_full)
+
+# Tidy output
+full_results <- tidy(model_full, conf.int = TRUE)
+kable(full_results, 
+      caption = "Multiple Regression: Rent Burden ~ Foreign-Born % + Income",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# Model fit statistics
+glance_full <- glance(model_full)
+kable(glance_full %>% select(r.squared, adj.r.squared, p.value, sigma),
+      caption = "Model Fit Statistics (Full Model)",
+      digits = 4) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+```
+
+## Interpretation of Results
+
+```{r interpret-results}
+# Extract key coefficients for interpretation
+fb_coef <- coef(model_full)["foreign_born_pct"]
+income_coef <- coef(model_full)["median_income"]
+r_squared <- summary(model_full)$r.squared
+
+cat("Key Findings:\n")
+cat("=============\n\n")
+cat(paste0("1. A 10 percentage point increase in foreign-born population is associated with\n",
+           "   a ", round(fb_coef * 10, 2), " percentage point change in rent burden.\n\n"))
+cat(paste0("2. The model explains ", round(r_squared * 100, 1), "% of the variance in rent burden\n",
+           "   across NYC boroughs.\n\n"))
+cat("3. The regression equation is:\n")
+cat(paste0("   Rent Burden (%) = ", round(coef(model_full)[1], 2), 
+           " + ", round(fb_coef, 4), " × Foreign-Born (%)",
+           " + ", round(income_coef, 6), " × Median Income\n"))
+```
+
+## Regression Diagnostic Visualization
+
+```{r regression-viz}
+# Predicted vs Actual plot
+nyc_analysis$predicted <- predict(model_full)
+nyc_analysis$residuals <- residuals(model_full)
+
+ggplot(nyc_analysis, aes(x = predicted, y = rent_burden_pct)) +
+  geom_point(aes(color = borough), size = 5) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray50") +
+  geom_text(aes(label = borough), vjust = -1, size = 3) +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = "Model Fit: Predicted vs. Actual Rent Burden",
+    x = "Predicted Rent Burden (%)",
+    y = "Actual Rent Burden (%)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+---
+
+# Discussion and Conclusions
+
+## Summary of Findings
+
+This exploratory analysis examined the relationship between immigrant population concentration and rent burden across New York City's five boroughs using 2023 American Community Survey data. The key findings support our hypothesis:
+
+**1. Positive Association:** Boroughs with higher percentages of foreign-born residents tend to have higher rates of rent burden. The correlation between these variables is positive, and the relationship persists after controlling for median household income.
+
+**2. Substantial Variation:** NYC boroughs show considerable variation in both immigrant concentration (ranging from approximately 23% to 46% foreign-born) and rent burden (ranging from approximately 46% to 58% of renter households paying 30%+ of income on rent).
+
+**3. Income Matters, But Doesn't Explain Everything:** While median household income is negatively associated with rent burden (higher income → lower burden), the foreign-born variable remains meaningfully associated with rent burden even after income is accounted for.
+
+## Limitations
+
+Several important limitations must be acknowledged:
+
+**Ecological Fallacy:** This borough-level analysis cannot make inferences about individual households. Finding that immigrant-dense boroughs have higher rent burden does not definitively mean immigrant households themselves are more rent-burdened.
+
+**Small Sample Size:** With only 5 observations (boroughs), statistical power is severely limited. The results are directional and exploratory rather than definitive.
+
+**Omitted Variables:** Many factors influence rent burden including housing stock characteristics, neighborhood amenities, transportation access, and local rental market dynamics. These are not captured in our model.
+
+**Heterogeneity Within "Foreign-Born":** The foreign-born population includes naturalized citizens, green card holders, visa holders, and undocumented individuals—groups with vastly different legal rights, employment opportunities, and access to assistance programs.
+
+## Future Directions
+
+This exploratory analysis suggests several avenues for future research:
+
+- **Microdata Analysis:** Using ACS Public Use Microdata Sample (PUMS) to examine individual-level differences in rent burden between foreign-born and native-born households
+- **Neighborhood-Level Analysis:** Examining patterns at the census tract or PUMA level for greater statistical power
+- **Longitudinal Analysis:** Tracking how the immigration-rent burden relationship has changed over time
+- **Policy Evaluation:** Assessing whether affordable housing programs and rental assistance effectively reach immigrant communities
+
+## Policy Implications
+
+If the patterns observed here hold at the individual level, they suggest several policy considerations:
+
+- Expanding affordable housing development in immigrant-dense neighborhoods
+- Improving access to rental assistance programs for non-citizen residents
+- Strengthening coordination between NYC's Mayor's Office of Immigrant Affairs and housing agencies
+- Providing legal navigation services to help immigrant families access housing resources
+- Supporting workforce development programs to improve wage outcomes
+
+---
+
+# References
+
+Hernández, D., Jiang, Y., Carrión, D., Phillips, D., & Aratani, Y. (2016). Housing hardship and energy insecurity among native-born and immigrant low-income families with children in the United States. *Journal of Children and Poverty*, 22(2), 77-92.
+
+NYC Mayor's Office of Immigrant Affairs. (2023). *State of Our Immigrant City: MOIA Annual Report for Calendar Year 2022*. City of New York.
+  
+NYC Mayor's Office of Immigrant Affairs. (2024). *State of Our Immigrant City: MOIA Annual Report for Calendar Year 2023*. City of New York.
+
+Pratt Center for Community Development & New York Immigrant Housing Collaborative. (2008). *Confronting the Housing Squeeze: Challenges Facing Immigrant Tenants, and What New York Can Do*. Pratt Center for Community Development.
+
+U.S. Census Bureau. (2024). *American Community Survey 1-Year Estimates, Data Profiles DP02 and DP04: New York City, 2023*. U.S. Department of Commerce.
+
+Velázquez, J. (2025, November 14). Data Briefing: A Portrait of Immigrant New Yorkers. *The Center for Migration Studies of New York*. https://cmsny.org/publications/data-briefing-on-new-york-city-immigrants/
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
